@@ -1,0 +1,17 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function userInSpace(spaceId) {
+      return isSignedIn() && request.auth.uid in get(/databases/(default)/documents/privateSpaces/$(spaceId)).data.members;
+    }
+
+    match /privateSpaces/{spaceId}/{fileName} {
+      allow read: if isSignedIn() && userInSpace(spaceId);
+      allow write: if isSignedIn() && userInSpace(spaceId) && request.resource.size < 25 * 1024 * 1024;
+    }
+  }
+}

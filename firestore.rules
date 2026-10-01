@@ -1,0 +1,41 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function userInSpace(spaceId) {
+      return isSignedIn() && request.auth.uid in get(/databases/$(database)/documents/privateSpaces/$(spaceId)).data.members;
+    }
+
+    match /users/{userId} {
+      allow read: if isSignedIn() && userId == request.auth.uid;
+      allow create: if isSignedIn() && userId == request.auth.uid;
+      allow update: if isSignedIn() && userId == request.auth.uid;
+      allow delete: if false;
+    }
+
+    match /privateSpaces/{spaceId} {
+      allow read: if isSignedIn() && request.auth.uid in resource.data.members;
+      allow create: if isSignedIn()
+        && request.resource.data.members is list
+        && request.resource.data.members.size() <= 2
+        && request.resource.data.createdBy == request.auth.uid;
+      allow update: if isSignedIn()
+        && request.auth.uid in resource.data.members
+        && request.resource.data.members.size() <= 2;
+      allow delete: if false;
+    }
+
+    match /privateSpaces/{spaceId}/messages/{messageId} {
+      allow read: if userInSpace(spaceId);
+      allow create: if userInSpace(spaceId)
+        && request.resource.data.senderId == request.auth.uid;
+      allow update: if userInSpace(spaceId)
+        && resource.data.senderId == request.auth.uid;
+      allow delete: if userInSpace(spaceId)
+        && resource.data.senderId == request.auth.uid;
+    }
+  }
+}
