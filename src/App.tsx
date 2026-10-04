@@ -1,21 +1,19 @@
-import { useEffect, useRef, useState } from 'react'
+import {useEffect ,useRef,useState} from 'react'
 import {
   addDoc,
+  arrayUnion,
   collection,
-  deleteDoc,
   doc,
   getDoc,
-  getDocs,
   onSnapshot,
   orderBy,
   query,
   serverTimestamp,
   setDoc,
-  updateDoc,
-  where,
   type Timestamp,
+  writeBatch,
 } from 'firebase/firestore'
-import { onAuthStateChanged, type User as FirebaseUser } from 'firebase/auth'
+import {onAuthStateChanged, type User as FirebaseUser } from 'firebase/auth'
 import {
   CheckCheck,
   Copy,
@@ -28,26 +26,7 @@ import {
   Sparkles,
   WifiOff,
 } from 'lucide-react'
-import {
-  auth,
-  db,
-  firebaseReady,
-  getFirebaseErrorMessage,
-  resetPasswordForEmail,
-  signInUser,
-  signOutUser,
-  signUpUser,
-  usingMockFirebase,
-  getMockUserProfile,
-  updateMockUserProfile,
-  createMockSpace,
-  joinMockSpace,
-  getMockSpace,
-  getMockMessages,
-  addMockMessage,
-  leaveMockSpace,
-} from './firebase'
-import { onMockAuthStateChanged } from './mockFirebase'
+import { auth, db, firebaseReady, getFirebaseErrorMessage, resetPasswordForEmail, signInUser, signOutUser, signUpUser } from './lib/firebase'
 
 type UserProfile = {
   uid: string
@@ -59,9 +38,10 @@ type UserProfile = {
 
 type PrivateSpace = {
   id: string
-  code: string
+  pairingCode: string
   members: string[]
   createdBy: string
+  status: 'waiting' | 'paired'
   createdAt?: Timestamp | string | number | null
 }
 
@@ -83,7 +63,12 @@ type BeforeInstallPromptEvent = Event & {
   userChoice: Promise<{ outcome: 'accepted' | 'dismissed'; platform: string }>
 }
 
-const generatePairingCode = () => `MINE-${Math.random().toString(36).slice(2, 8).toUpperCase()}`
+const generatePairingCode = () => {
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
+  const randomBytes = crypto.getRandomValues(new Uint8Array(8))
+  const suffix = Array.from(randomBytes, (byte) => alphabet[byte % alphabet.length]).join('')
+  return `MINE-${suffix}`
+}
 
 function formatTime(value?: Timestamp | string | number | null) {
   if (!value) return 'just now'
@@ -132,40 +117,6 @@ function App() {
   }, [])
 
   useEffect(() => {
-    if (!firebaseReady) {
-      setAuthLoading(false)
-      return
-    }
-
-    // Handle mock Firebase
-    if (usingMockFirebase) {
-      const unsubscribe = onMockAuthStateChanged((mockUser) => {
-        if (mockUser) {
-          // Mock user exists
-          const profile = getMockUserProfile(mockUser.uid)
-          if (profile) {
-            setUserProfile(profile as any)          } else {
-            const newProfile: UserProfile = {
-              uid: mockUser.uid,
-              email: mockUser.email,
-              displayName: mockUser.displayName,
-              spaceId: null,
-              createdAt: Date.now(),
-            }
-            updateMockUserProfile(mockUser.uid, newProfile)
-            setUserProfile(newProfile)
-          }
-          setAuthUser(mockUser as any)
-        } else {
-          setAuthUser(null)
-          setUserProfile(null)
-        }
-        setAuthLoading(false)
-      })
-      return unsubscribe
-    }
-
-    // Handle real Firebase
     if (!auth || !db) {
       setAuthLoading(false)
       return
@@ -218,19 +169,9 @@ function App() {
   }, [])
 
   useEffect(() => {
-    if (!authUser || !userProfile?.spaceId) {
+    if (!authUser || !db || !userProfile?.spaceId) {
       return
     }
-
-    if (usingMockFirebase) {
-      const mockSpace = getMockSpace(userProfile.spaceId)
-      if (mockSpace) {
-        setSpace(mockSpace)
-      }
-      return
-    }
-
-    if (!db) return
 
     const spaceRef = doc(db, 'privateSpaces', userProfile.spaceId)
     const unsubscribe = onSnapshot(spaceRef, (snapshot) => {
@@ -246,45 +187,45 @@ function App() {
   }, [authUser, userProfile?.spaceId])
 
   const handleLeaveSpace = async () => {
-    if (!auth || !userProfile?.spaceId) return
+    if (!auth || !db || !userProfile?.spaceId) return
 
     try {
-      if (usingMockFirebase) {
-        leaveMockSpace(userProfile.spaceId, userProfile.uid)
-        updateMockUserProfile(userProfile.uid, { ...userProfile, spaceId: null })
-        setUserProfile({ ...userProfile, spaceId: null })
-        setSpace(null)
-        setActiveTab('home')
-        return
-      }
-
-      if (!db) return
-
       const spaceRef = doc(db, 'privateSpaces', userProfile.spaceId)
       const spaceSnapshot = await getDoc(spaceRef)
+      const batch = writeBatch(db)
 
       if (spaceSnapshot.exists()) {
-        const members = (spaceSnapshot.data()?.members ?? []) as string[]
-        const nextMembers = members.filter((memberId) => memberId !== (auth?.currentUser?.uid ?? ''))
+        const spaceData = spaceSnapshot.data() as PrivateSpace
+        const currentUid = auth.currentUser?.uid
+        const members = spaceData.members
+        const nextMembers = members.filter((memberId) => memberId !== currentUid)
+
+        if (!currentUid || !members.includes(currentUid)) {
+          throw new Error('Your account is not a member of this private space.')
+        }
 
         if (nextMembers.length > 0) {
-          await updateDoc(spaceRef, { members: nextMembers })
+          batch.update(spaceRef, { members: nextMembers, status: 'waiting' })
         } else {
-          await deleteDoc(spaceRef)
+          batch.delete(spaceRef)
+          batch.delete(doc(db, 'pairingCodes', spaceData.pairingCode))
         }
+      } else {
+        console.warn('The linked private space was not found; clearing the stale profile link.')
       }
 
-      await setDoc(
+      batch.set(
         doc(db, 'users', userProfile.uid),
         { ...userProfile, spaceId: null },
         { merge: true },
       )
+      await batch.commit()
 
       setUserProfile({ ...userProfile, spaceId: null })
       setSpace(null)
       setActiveTab('home')
-    } catch {
-      // Leave flow is intentionally quiet; user can retry from settings.
+    } catch (caughtError) {
+      window.alert(getFirebaseErrorMessage(caughtError))
     }
   }
 
@@ -333,6 +274,7 @@ function App() {
 
           {activeTab === 'chat' && (
             <ChatPanel
+              key={space?.id ?? userProfile?.spaceId ?? 'unpaired'}
               currentUser={authUser}
               currentProfile={userProfile}
               spaceId={space?.id ?? userProfile?.spaceId ?? null}
@@ -559,40 +501,50 @@ function PairingScreen({
   const [error, setError] = useState('')
 
   const createSpace = async () => {
-    if (!profile) return
+    if (!auth || !db || !profile) return
+
+    const firestore = db
+    const currentUser = auth.currentUser
+
+    if (!currentUser || currentUser.uid !== profile.uid) {
+      setError('Please sign in again before creating a private space.')
+      return
+    }
 
     setCreating(true)
     setFeedback('')
     setError('')
 
     try {
-      const code = generatePairingCode()
+      let code = ''
+      let pairingCodeRef: ReturnType<typeof doc> | null = null
 
-      if (usingMockFirebase) {
-        const spaceId = createMockSpace(code, profile.uid)
-        const updatedProfile = { ...profile, spaceId, displayName: profile.displayName || 'You' }
-        updateMockUserProfile(profile.uid, updatedProfile)
-        setOwnCode(code)
-        setFeedback('Your private space is ready ❤️')
-        onJoinedSpace(updatedProfile)
-        return
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        const candidate = generatePairingCode()
+        const candidateRef = doc(firestore, 'pairingCodes', candidate)
+        if (!(await getDoc(candidateRef)).exists()) {
+          code = candidate
+          pairingCodeRef = candidateRef
+          break
+        }
       }
 
-      if (!auth || !db || !profile) return
+      if (!code || !pairingCodeRef) {
+        throw new Error('Could not create a unique pairing code. Please try again.')
+      }
 
-      const firestore = db
       const spaceRef = doc(collection(firestore, 'privateSpaces'))
-      const payload = {
+      const batch = writeBatch(firestore)
+      batch.set(spaceRef, {
         id: spaceRef.id,
-        code,
-        members: [auth.currentUser?.uid ?? profile.uid],
-        createdBy: auth.currentUser?.uid ?? profile.uid,
+        pairingCode: code,
+        members: [currentUser.uid],
+        createdBy: currentUser.uid,
+        status: 'waiting',
         createdAt: serverTimestamp(),
-      }
-
-      await setDoc(spaceRef, payload)
-
-      await setDoc(
+      })
+      batch.set(pairingCodeRef, { spaceId: spaceRef.id })
+      batch.set(
         doc(firestore, 'users', profile.uid),
         {
           ...profile,
@@ -601,6 +553,7 @@ function PairingScreen({
         },
         { merge: true },
       )
+      await batch.commit()
 
       setOwnCode(code)
       setFeedback('Your private space is ready ❤️')
@@ -613,7 +566,18 @@ function PairingScreen({
   }
 
   const joinSpace = async () => {
-    if (!profile) return
+    if (!auth || !db || !profile) return
+
+    const currentUser = auth.currentUser
+    if (!currentUser || currentUser.uid !== profile.uid) {
+      setError('Please sign in again before joining a private space.')
+      return
+    }
+
+    if (profile.spaceId) {
+      setError('You already have a private space.')
+      return
+    }
 
     const cleanCode = partnerCode.trim().toUpperCase()
     if (!cleanCode) {
@@ -621,61 +585,41 @@ function PairingScreen({
       return
     }
 
+    const firestore = db
+
     setJoining(true)
     setFeedback('')
     setError('')
 
     try {
-      if (usingMockFirebase) {
-        const spaceId = joinMockSpace(cleanCode, profile.uid)
-        const updatedProfile = { ...profile, spaceId }
-        updateMockUserProfile(profile.uid, updatedProfile)
-        setFeedback('Your private space is ready ❤️')
-        onJoinedSpace(updatedProfile)
-        return
-      }
-
-      if (!auth || !db || !profile) return
-
-      const firestore = db
-      const spacesRef = collection(firestore, 'privateSpaces')
-      const matchQuery = query(spacesRef, where('code', '==', cleanCode))
-      const matches = await getDocs(matchQuery)
-
-      if (matches.empty) {
+      const pairingCodeSnapshot = await getDoc(doc(firestore, 'pairingCodes', cleanCode))
+      if (!pairingCodeSnapshot.exists()) {
         setError('Invalid pairing code.')
         return
       }
 
-      const spaceDoc = matches.docs[0]
-      const spaceData = spaceDoc.data() as Partial<PrivateSpace>
-      const members = Array.isArray(spaceData.members) ? spaceData.members : []
-
-      if (members.length >= 2) {
-        setError('This private space is full.')
-        return
+      const spaceId = pairingCodeSnapshot.data().spaceId
+      if (typeof spaceId !== 'string' || !spaceId) {
+        throw new Error('This pairing code is invalid. Ask your partner to create a new code.')
       }
 
-      if (profile.spaceId) {
-        setError('You already have a private space.')
-        return
-      }
-
-      await updateDoc(spaceDoc.ref, {
-        members: [...members, auth.currentUser?.uid ?? profile.uid],
+      const batch = writeBatch(firestore)
+      batch.update(doc(firestore, 'privateSpaces', spaceId), {
+        members: arrayUnion(currentUser.uid),
+        status: 'paired',
       })
-
-      await setDoc(
+      batch.set(
         doc(firestore, 'users', profile.uid),
         {
           ...profile,
-          spaceId: spaceDoc.id,
+          spaceId,
         },
         { merge: true },
       )
+      await batch.commit()
 
       setFeedback('Your private space is ready ❤️')
-      onJoinedSpace({ ...profile, spaceId: spaceDoc.id })
+      onJoinedSpace({ ...profile, spaceId })
     } catch (caughtError) {
       setError(getFirebaseErrorMessage(caughtError))
     } finally {
@@ -804,7 +748,7 @@ function HomeTab({
 
         <div className="mt-5 rounded-[20px] border border-[#f0e4f7] bg-white/80 p-3 text-center">
           <p className="text-xs uppercase tracking-[0.2em] text-[#8a7999]">Private space</p>
-          <p className="mt-2 text-base font-medium text-[#352748]">{space?.code ?? 'Pending pairing'}</p>
+          <p className="mt-2 text-base font-medium text-[#352748]">{space?.pairingCode ?? 'Pending pairing'}</p>
         </div>
       </div>
 
@@ -850,28 +794,26 @@ function ChatPanel({
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
   const [sending, setSending] = useState(false)
+  const [error, setError] = useState('')
   const bottomRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
-    if (!spaceId) return
-
-    if (usingMockFirebase) {
-      const mockMsgs = getMockMessages(spaceId)
-      setMessages(mockMsgs as ChatMessage[])
-      return
-    }
-
-    if (!db) return
+    if (!db || !spaceId) return
 
     const firestore = db
     const messagesQuery = query(collection(firestore, 'privateSpaces', spaceId, 'messages'), orderBy('createdAt', 'asc'))
-    const unsubscribe = onSnapshot(messagesQuery, (snapshot) => {
-      const nextMessages = snapshot.docs.map((docSnap) => ({
-        id: docSnap.id,
-        ...(docSnap.data() as Omit<ChatMessage, 'id'>),
-      })) as ChatMessage[]
-      setMessages(nextMessages)
-    })
+    const unsubscribe = onSnapshot(
+      messagesQuery,
+      (snapshot) => {
+        const nextMessages = snapshot.docs.map((docSnap) => ({
+          id: docSnap.id,
+          ...(docSnap.data() as Omit<ChatMessage, 'id'>),
+        })) as ChatMessage[]
+        setMessages(nextMessages)
+        setError('')
+      },
+      (caughtError) => setError(getFirebaseErrorMessage(caughtError)),
+    )
 
     return () => unsubscribe()
   }, [spaceId])
@@ -881,32 +823,27 @@ function ChatPanel({
   }, [messages])
 
   const sendMessage = async () => {
-    if (!spaceId || !input.trim()) return
+    if (!db || !spaceId || !input.trim()) return
 
+    const firestore = db
     setSending(true)
+    setError('')
 
     try {
-      if (usingMockFirebase) {
-        addMockMessage(spaceId, input.trim(), currentUser.uid, currentProfile?.displayName ?? currentUser.displayName ?? 'You')
-        // Force update by getting fresh messages
-        const freshMessages = getMockMessages(spaceId)
-        setMessages(freshMessages as ChatMessage[])
-        setInput('')
-      } else {
-        if (!db) return
-
-        const firestore = db
-        await addDoc(collection(firestore, 'privateSpaces', spaceId, 'messages'), {
-          text: input.trim(),
-          senderId: currentUser.uid,
-          senderName: currentProfile?.displayName ?? currentUser.displayName ?? 'You',
-          createdAt: serverTimestamp(),
-          status: 'sent',
-        })
-        setInput('')
-      }
-    } catch {
-      // user-facing error is handled by the app shell via current UI state
+      await addDoc(collection(firestore, 'privateSpaces', spaceId, 'messages'), {
+        text: input.trim(),
+        senderId: currentUser.uid,
+        senderName: currentProfile?.displayName ?? currentUser.displayName ?? 'You',
+        createdAt: serverTimestamp(),
+        status: 'sent',
+        type: 'text',
+        readBy: [currentUser.uid],
+        editedAt: null,
+        replyTo: null,
+      })
+      setInput('')
+    } catch (caughtError) {
+      setError(getFirebaseErrorMessage(caughtError))
     } finally {
       setSending(false)
     }
@@ -926,6 +863,7 @@ function ChatPanel({
       </div>
 
       <div className="flex-1 space-y-3 overflow-y-auto px-3 py-4">
+        {error && <p className="rounded-2xl bg-[#fdf0f3] px-3 py-2 text-sm text-[#9a2d4f]">{error}</p>}
         {messages.length === 0 && (
           <div className="rounded-[22px] border border-dashed border-[#e8d7f5] bg-white p-4 text-sm text-[#715f86]">
             Start your first private message.
@@ -1017,7 +955,7 @@ function SettingsTab({
 
       <div className="rounded-[24px] border border-[#ebdef7] bg-white p-4">
         <p className="text-[10px] uppercase tracking-[0.24em] text-[#8c7ba6]">Private space</p>
-        <p className="mt-3 text-sm text-[#2a2140]">Code: {space?.code ?? 'Not paired'}</p>
+        <p className="mt-3 text-sm text-[#2a2140]">Code: {space?.pairingCode ?? 'Not paired'}</p>
         <p className="mt-2 text-sm text-[#2a2140]">Private space ID: {space?.id ?? 'No space yet'}</p>
       </div>
 
