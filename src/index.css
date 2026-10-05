@@ -4,7 +4,7 @@
   font-family: 'Inter', 'Segoe UI', sans-serif;
   line-height: 1.5;
   font-weight: 400;
-  color: #2e203f;
+  color: #1b0930;
   background: #f8f2ff;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
@@ -27,7 +27,7 @@ body,
 
 body {
   min-height: 100vh;
-  background: #f7f0ff;
+  background: #c2a8df;
 }
 
 button,

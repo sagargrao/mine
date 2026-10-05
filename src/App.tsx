@@ -95,6 +95,7 @@ function App() {
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null)
   const [space, setSpace] = useState<PrivateSpace | null>(null)
   const [authLoading, setAuthLoading] = useState(true)
+  const [startupError, setStartupError] = useState('')
   const [activeTab, setActiveTab] = useState<TabKey>('home')
   const [offline, setOffline] = useState(() => (typeof navigator === 'undefined' ? false : !navigator.onLine))
   const [installPrompt, setInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null)
@@ -126,6 +127,7 @@ function App() {
 
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       setAuthUser(user)
+      setStartupError('')
 
       if (!user) {
         setUserProfile(null)
@@ -134,27 +136,33 @@ function App() {
         return
       }
 
-      const userRef = doc(firestore, 'users', user.uid)
-      const snapshot = await getDoc(userRef)
-      const profile = snapshot.exists()
-        ? ({ uid: user.uid, ...(snapshot.data() as Partial<UserProfile>) } as UserProfile)
-        : ({
-            uid: user.uid,
-            email: user.email ?? '',
-            displayName: user.displayName ?? 'You',
-            spaceId: null,
-            createdAt: Date.now(),
-          } satisfies UserProfile)
+      setAuthLoading(true)
+      try {
+        const userRef = doc(firestore, 'users', user.uid)
+        const snapshot = await getDoc(userRef)
+        const profile = snapshot.exists()
+          ? ({ uid: user.uid, ...(snapshot.data() as Partial<UserProfile>) } as UserProfile)
+          : ({
+              uid: user.uid,
+              email: user.email ?? '',
+              displayName: user.displayName ?? 'You',
+              spaceId: null,
+              createdAt: Date.now(),
+            } satisfies UserProfile)
 
-      if (!snapshot.exists()) {
-        await setDoc(userRef, profile)
-      }
+        if (!snapshot.exists()) {
+          await setDoc(userRef, profile)
+        }
 
-      setUserProfile(profile)
-      if (!profile.spaceId) {
-        setSpace(null)
+        setUserProfile(profile)
+        if (!profile.spaceId) {
+          setSpace(null)
+        }
+      } catch (caughtError) {
+        setStartupError(getFirebaseErrorMessage(caughtError))
+      } finally {
+        setAuthLoading(false)
       }
-      setAuthLoading(false)
     })
 
     const updateOfflineStatus = () => setOffline(!navigator.onLine)
@@ -235,6 +243,10 @@ function App() {
 
   if (authLoading) {
     return <LoadingScreen />
+  }
+
+  if (startupError) {
+    return <FirebaseErrorScreen message={startupError} />
   }
 
   if (!authUser) {
@@ -469,7 +481,9 @@ function AuthScreen() {
           onClick={submit}
           className="mt-6 flex w-full items-center justify-center rounded-2xl bg-[#2d2143] px-4 py-3 text-sm font-semibold text-white transition hover:bg-[#221632] disabled:cursor-not-allowed disabled:opacity-70"
         >
-          {loading ? 'Please wait...' : mode === 'signup' ? 'Create account' : 'Login'}
+          {loading
+            ? mode === 'signup' ? 'Creating your MINE account...' : 'Signing in...'
+            : mode === 'signup' ? 'Create account' : 'Login'}
         </button>
 
         {mode === 'login' && (
@@ -618,10 +632,14 @@ function PairingScreen({
       )
       await batch.commit()
 
-      setFeedback('Your private space is ready ❤️')
+      setFeedback('Private space joined successfully.')
       onJoinedSpace({ ...profile, spaceId })
     } catch (caughtError) {
-      setError(getFirebaseErrorMessage(caughtError))
+      setError(
+        caughtError instanceof Error && caughtError.message.includes('permission-denied')
+          ? 'This MINE private space already has two members.'
+          : getFirebaseErrorMessage(caughtError),
+      )
     } finally {
       setJoining(false)
     }
@@ -997,6 +1015,24 @@ function LoadingScreen() {
     <div className="flex min-h-screen items-center justify-center bg-[#f8f1ff] text-[#2d2143]">
       <div className="rounded-[24px] border border-[#ecdffb] bg-white px-5 py-4 text-sm font-medium shadow-[0_12px_28px_rgba(105,75,124,0.08)]">
         Loading MINE...
+      </div>
+    </div>
+  )
+}
+
+function FirebaseErrorScreen({ message }: { message: string }) {
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-[#f8f1ff] px-4 text-[#2d2143]">
+      <div className="w-full max-w-md rounded-[28px] border border-[#eee0f7] bg-white p-6 shadow-[0_12px_32px_rgba(92,64,99,0.1)]">
+        <h2 className="text-center text-2xl font-semibold">Unable to connect to MINE</h2>
+        <p className="mt-3 text-center text-sm leading-6 text-[#6f637b]">{message}</p>
+        <button
+          type="button"
+          onClick={() => window.location.reload()}
+          className="mt-5 w-full rounded-2xl bg-[#2d2143] px-4 py-3 text-sm font-semibold text-white"
+        >
+          Try again
+        </button>
       </div>
     </div>
   )

@@ -71,19 +71,29 @@ export function getFirebaseErrorMessage(error: unknown) {
   const message = error instanceof Error ? error.message : 'Something went wrong.'
 
   if (message.includes('auth/email-already-in-use')) {
-    return 'This email is already in use.'
+    return 'Email already registered.'
   }
 
-  if (message.includes('auth/invalid-email')) {
-    return 'The email address looks invalid.'
+  if (
+    message.includes('auth/invalid-email')
+    || message.includes('auth/user-not-found')
+    || message.includes('auth/wrong-password')
+    || message.includes('auth/invalid-credential')
+    || message.includes('auth/invalid-login-credentials')
+  ) {
+    return 'Invalid email or password.'
   }
 
   if (message.includes('auth/weak-password')) {
     return 'Choose a stronger password.'
   }
 
-  if (message.includes('auth/user-not-found') || message.includes('auth/wrong-password')) {
-    return 'Incorrect email or password.'
+  if (message.includes('auth/network-request-failed')) {
+    return 'Unable to connect to Firebase. Check your internet connection and try again.'
+  }
+
+  if (message.includes('auth/operation-not-allowed')) {
+    return 'Email/Password sign-in is disabled in Firebase Authentication.'
   }
 
   if (message.includes('permission-denied')) {
